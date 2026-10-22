@@ -1,0 +1,170 @@
+name: Private app - iPhone and Watch
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_commit:
+        description: Full commit SHA in the private source repository
+        required: true
+        type: string
+      source_archive:
+        description: Approved source archive filename
+        required: true
+        type: string
+      source_sha256:
+        description: Approved archive SHA256
+        required: true
+        type: string
+      app_version:
+        description: Expected app version, for example 1.10.6
+        required: true
+        type: string
+      build_number:
+        description: Unused Apple build number, at least 32
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: private-app-testflight
+  cancel-in-progress: false
+
+jobs:
+  ios:
+    if: github.actor == github.repository_owner && github.ref == 'refs/heads/main'
+    runs-on: macos-26-intel
+    timeout-minutes: 150
+    env:
+      CI: '1'
+      EAS_NO_VCS: '1'
+      EAS_SKIP_AUTO_FINGERPRINT: '1'
+      FASTLANE_XCODEBUILD_SETTINGS_TIMEOUT: '120'
+      SOURCE_COMMIT: ${{ inputs.source_commit }}
+      SOURCE_ARCHIVE: ${{ inputs.source_archive }}
+      SOURCE_SHA256: ${{ inputs.source_sha256 }}
+      APP_VERSION: ${{ inputs.app_version }}
+      APP_BUILD: ${{ inputs.build_number }}
+    steps:
+      - name: Validate release references and required access
+        env:
+          READ_KEY: ${{ secrets.APP_SOURCE_READ_KEY }}
+          SIGNING_ACCESS: ${{ secrets.EXPO_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "$READ_KEY" && test -n "$SIGNING_ACCESS" || { echo '::error::Dedicated source and signing access must be configured first.'; exit 1; }
+          python3 <<'PY'
+          import os, re
+          rules = {'SOURCE_COMMIT': r'[0-9a-f]{40}', 'SOURCE_ARCHIVE': r'performance-lab-[A-Za-z0-9.-]+\.tar\.gz', 'SOURCE_SHA256': r'[0-9a-f]{64}', 'APP_VERSION': r'\d+\.\d+\.\d+', 'APP_BUILD': r'[1-9]\d{0,8}'}
+          if not all(re.fullmatch(pattern, os.environ[key]) for key, pattern in rules.items()) or int(os.environ['APP_BUILD']) < 32:
+              raise SystemExit('Invalid release references')
+          PY
+      - name: Read the approved private source commit
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          repository: salemmemanuel-dotcom/performance-lab-native
+          ref: ${{ inputs.source_commit }}
+          ssh-key: ${{ secrets.APP_SOURCE_READ_KEY }}
+          persist-credentials: false
+          fetch-depth: 1
+          show-progress: false
+          path: private-source
+      - name: Node.js
+        uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444
+        with:
+          node-version: '22'
+      - name: Verify and unpack approved archive without publishing its contents
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 <<'PY'
+          import hashlib, os, pathlib, shutil, tarfile
+          source = pathlib.Path('private-source') / os.environ['SOURCE_ARCHIVE']
+          if hashlib.sha256(source.read_bytes()).hexdigest() != os.environ['SOURCE_SHA256']:
+              raise SystemExit('Source integrity verification failed')
+          root = pathlib.Path(os.environ['RUNNER_TEMP']) / 'private-app'
+          root.mkdir()
+          with tarfile.open(source, 'r:gz') as archive:
+              members = archive.getmembers()
+              if len(members) > 20000 or sum(m.size for m in members) > 500_000_000:
+                  raise SystemExit('Source package exceeds permitted size')
+              for member in members:
+                  path = pathlib.PurePosixPath(member.name)
+                  if path.is_absolute() or '..' in path.parts or not path.parts or path.parts[0] != 'performance-lab-native' or not (member.isdir() or member.isfile()):
+                      raise SystemExit('Unsupported source package entry')
+              for member in members:
+                  target = root / member.name
+                  if member.isdir():
+                      target.mkdir(parents=True, exist_ok=True)
+                  else:
+                      target.parent.mkdir(parents=True, exist_ok=True)
+                      with archive.extractfile(member) as src, target.open('wb') as dest:
+                          shutil.copyfileobj(src, dest)
+          with open(os.environ['GITHUB_ENV'], 'a') as env:
+              env.write(f'EAS_PROJECT_ROOT={root / "performance-lab-native"}\n')
+          print('Approved source package verified.')
+          PY
+      - name: Prepare build tools privately
+        shell: bash
+        run: |
+          set -euo pipefail
+          private_log="$RUNNER_TEMP/private-prepare.log"
+          if ! (cd "$EAS_PROJECT_ROOT" && npm ci --no-audit --no-fund && npm install --prefix "$RUNNER_TEMP/eas-cli" eas-cli@24.14.0 --no-audit --no-fund) >"$private_log" 2>&1; then
+            echo '::error::Build preparation failed. Private logs were not published.'
+            exit 1
+          fi
+          echo 'Build tools ready.'
+      - name: Set release metadata inside the temporary build only
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$EAS_PROJECT_ROOT"
+          node <<'JS'
+          const fs = require('fs');
+          const app = JSON.parse(fs.readFileSync('app.json', 'utf8'));
+          if (app.expo.version !== process.env.APP_VERSION) throw Error('App version mismatch');
+          app.expo.ios.buildNumber = process.env.APP_BUILD;
+          fs.writeFileSync('app.json', JSON.stringify(app, null, 2) + '\n');
+          const eas = JSON.parse(fs.readFileSync('eas.json', 'utf8'));
+          eas.build.production.autoIncrement = false;
+          fs.writeFileSync('eas.json', JSON.stringify(eas, null, 2) + '\n');
+          JS
+      - name: Compile and sign privately on the standard GitHub Mac
+        env:
+          EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
+          EAS_LOCAL_BUILD_WORKINGDIR: ${{ runner.temp }}/private-native-build
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$EAS_PROJECT_ROOT"
+          if ! node "$RUNNER_TEMP/eas-cli/node_modules/eas-cli/bin/run" build --platform ios --profile production --local --non-interactive --freeze-credentials --output "$RUNNER_TEMP/PrivateApp.ipa" >"$RUNNER_TEMP/private-build.log" 2>&1; then
+            echo '::error::Compilation failed. Source, signing details and private logs were not published.'
+            exit 1
+          fi
+          echo 'iPhone and Watch package compiled and signed.'
+      - name: Verify both app versions without publishing package contents
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 <<'PY'
+          import os, plistlib, zipfile
+          with zipfile.ZipFile(os.environ['RUNNER_TEMP'] + '/PrivateApp.ipa') as package:
+              apps = [plistlib.loads(package.read(name)) for name in package.namelist() if name.endswith('.app/Info.plist')]
+          if len(apps) != 2 or not all(app['CFBundleShortVersionString'] == os.environ['APP_VERSION'] and app['CFBundleVersion'] == os.environ['APP_BUILD'] for app in apps):
+              raise SystemExit('Signed package verification failed')
+          print('Both signed app versions verified.')
+          PY
+      - name: Submit directly to Apple without public artifacts
+        env:
+          EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$EAS_PROJECT_ROOT"
+          if ! node "$RUNNER_TEMP/eas-cli/node_modules/eas-cli/bin/run" submit --platform ios --profile production --path "$RUNNER_TEMP/PrivateApp.ipa" --non-interactive --wait >"$RUNNER_TEMP/private-submit.log" 2>&1; then
+            echo '::error::Submission was not confirmed. Check Expo Submissions before attempting another upload; private logs were not published.'
+            exit 1
+          fi
+          echo 'Submission to Apple succeeded. Apple processing is a separate phase.'
