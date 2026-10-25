@@ -12,7 +12,7 @@ jobs:
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
         with:
           repository: salemmemanuel-dotcom/performance-lab-native
-          ref: 5d3c164b7c5a399665bb211ce13b0045521457a4
+          ref: 235bd19c967bcd34185f889ebb11af0dd879f2cf
           ssh-key: ${{ secrets.APP_SOURCE_READ_KEY }}
           persist-credentials: false
           show-progress: false
@@ -25,8 +25,8 @@ jobs:
           set -euo pipefail
           python3 <<'PY'
           import hashlib, pathlib, tarfile, shutil, os
-          archive=pathlib.Path('private-source/performance-lab-1.10.6-dashboard-watch.tar.gz')
-          if hashlib.sha256(archive.read_bytes()).hexdigest() != 'a833c7bf4b5919c179ce4de9da85a8274df930d41ab04fa0813115c4d85ed71f':
+          archive=pathlib.Path('private-source/performance-lab-1.10.6-dashboard-watch-r2.tar.gz')
+          if hashlib.sha256(archive.read_bytes()).hexdigest() != '35b652106e37849489ffeccbc8e34ad2ede2fe4726666b9da3d4b836fbe7323f':
               raise SystemExit('Checksum mismatch')
           target=pathlib.Path(os.environ['RUNNER_TEMP'])/'watch-source'
           with tarfile.open(archive,'r:gz') as package:
