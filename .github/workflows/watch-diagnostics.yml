@@ -1,0 +1,57 @@
+name: Private Watch compiler diagnostics
+on: workflow_dispatch
+permissions:
+  contents: read
+jobs:
+  watch:
+    if: github.actor == github.repository_owner
+    runs-on: macos-26-intel
+    timeout-minutes: 20
+    steps:
+      - name: Read approved private package
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          repository: salemmemanuel-dotcom/performance-lab-native
+          ref: 5d3c164b7c5a399665bb211ce13b0045521457a4
+          ssh-key: ${{ secrets.APP_SOURCE_READ_KEY }}
+          persist-credentials: false
+          show-progress: false
+          path: private-source
+      - name: Typecheck Watch with encrypted diagnostics only
+        env:
+          DIAGNOSTIC_PUBLIC_KEY: LS0tLS1CRUdJTiBQVUJMSUMgS0VZLS0tLS0KTUlJQm9qQU5CZ2txaGtpRzl3MEJBUUVGQUFPQ0FZOEFNSUlCaWdLQ0FZRUF4NThRcjJ6WmhKUUtTdUNuMW5VVApmZDJMSG9EYzZMZm9CajQ0UDk4anZnRUJLSVd6YnhqZ09oZ0VhbStkQ2dLeTV0UkJBTklYdGdFaGhFM2JPYVNqCmJ6ZEU1enBDcXJPK1R0c1RWSlNDLzZZaFdRRWZZd2JNV2lxWHRCV2Nsdm5HSW9KUDUzRU9oejhUeHJoZVVkK0YKMmx0SmpKcE5EbFhSRWU5SWRIWHlIem8rN1YvQWJQOFQ5TWlKbUhvM3BsVDVzY09UZzdOMVh1bXdzN0tRcTR1Rwpqc3AxY3JjbHErSDB6QlJvQ29mdkgwMkxOZjFRYmZDUmNhTUlweDVhcXdSQitINEJ0cWxKTldrVlhGQmRGdmZqClBWQUpDVnVzRjZ5RUlZdU1KRHI0QjJrYzd6YmZDaUY2OHF1dmtjTzZPMVlKbXowWmVMUXhkZ2dJeDMwNE84Z3AKYUtmUzJxK3VZUEI1bk9sbFBkaTNUKzZKY3NaZ3phUXBBM2NpcFU0RkRSbG5JSVZqWjJyNktHemE2dmN4VHRDVAp4WTAxOC8xQmpWZzNsN2wzOUFIK0Z2K3NiZ0ZGbnpYTENGdnlxd0VFUnJVK3lBUVljY1VJUEpqWUt4aWRNcURBClVDcUZBUkhiTW9QektxeGlnMlFISXV5MlU3V0RiRTQvVjdPcjRZSjRmMXBEQWdNQkFBRT0KLS0tLS1FTkQgUFVCTElDIEtFWS0tLS0tCg==
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 <<'PY'
+          import hashlib, pathlib, tarfile, shutil, os
+          archive=pathlib.Path('private-source/performance-lab-1.10.6-dashboard-watch.tar.gz')
+          if hashlib.sha256(archive.read_bytes()).hexdigest() != 'a833c7bf4b5919c179ce4de9da85a8274df930d41ab04fa0813115c4d85ed71f':
+              raise SystemExit('Checksum mismatch')
+          target=pathlib.Path(os.environ['RUNNER_TEMP'])/'watch-source'
+          with tarfile.open(archive,'r:gz') as package:
+              for member in package.getmembers():
+                  path=pathlib.PurePosixPath(member.name)
+                  if path.is_absolute() or '..' in path.parts or not path.parts or path.parts[0]!='performance-lab-native' or not (member.isdir() or member.isfile()):
+                      raise SystemExit('Unsafe source entry')
+                  dest=target/member.name
+                  if member.isdir(): dest.mkdir(parents=True,exist_ok=True)
+                  else:
+                      dest.parent.mkdir(parents=True,exist_ok=True)
+                      with package.extractfile(member) as src,dest.open('wb') as out: shutil.copyfileobj(src,out)
+          PY
+          cd "$RUNNER_TEMP/watch-source/performance-lab-native"
+          set +e
+          xcrun swiftc -typecheck -parse-as-library -target arm64-apple-watchos11.0-simulator -sdk "$(xcrun --sdk watchsimulator --show-sdk-path)" targets/watch/*.swift >"$RUNNER_TEMP/watch-diagnostics.log" 2>&1
+          diagnostic_exit=$?
+          set -e
+          echo "Watch compiler exit: $diagnostic_exit"
+          node <<'JS'
+          const fs=require('fs'),crypto=require('crypto'),zlib=require('zlib');
+          const raw=fs.readFileSync(process.env.RUNNER_TEMP+'/watch-diagnostics.log');
+          const key=crypto.randomBytes(32),iv=crypto.randomBytes(12),cipher=crypto.createCipheriv('aes-256-gcm',key,iv);
+          const encrypted=Buffer.concat([cipher.update(zlib.gzipSync(raw)),cipher.final()]);
+          const wrapped=crypto.publicEncrypt({key:Buffer.from(process.env.DIAGNOSTIC_PUBLIC_KEY,'base64'),oaepHash:'sha256'},key);
+          const envelope={key:wrapped.toString('base64'),iv:iv.toString('base64'),tag:cipher.getAuthTag().toString('base64'),data:encrypted.toString('base64')};
+          console.log('PRIVATE_WATCH_DIAGNOSTIC:'+Buffer.from(JSON.stringify(envelope)).toString('base64'));
+          JS
