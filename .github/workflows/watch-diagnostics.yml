@@ -12,7 +12,7 @@ jobs:
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
         with:
           repository: salemmemanuel-dotcom/performance-lab-native
-          ref: fab4dfe352c64b9dfb73eb0ab3fa7e700e15224b
+          ref: 1909450d287508316bda596e5142b19e312aae6e
           ssh-key: ${{ secrets.APP_SOURCE_READ_KEY }}
           persist-credentials: false
           show-progress: false
