@@ -12,7 +12,7 @@ jobs:
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
         with:
           repository: salemmemanuel-dotcom/performance-lab-native
-          ref: 235bd19c967bcd34185f889ebb11af0dd879f2cf
+          ref: 3b479995eb8e5bdcb8eaea691fa36b10053aa86b
           ssh-key: ${{ secrets.APP_SOURCE_READ_KEY }}
           persist-credentials: false
           show-progress: false
@@ -25,8 +25,8 @@ jobs:
           set -euo pipefail
           python3 <<'PY'
           import hashlib, pathlib, tarfile, shutil, os
-          archive=pathlib.Path('private-source/performance-lab-1.10.6-dashboard-watch-r2.tar.gz')
-          if hashlib.sha256(archive.read_bytes()).hexdigest() != '35b652106e37849489ffeccbc8e34ad2ede2fe4726666b9da3d4b836fbe7323f':
+          archive=pathlib.Path('private-source/performance-lab-1.10.6-watch-simple.tar.gz')
+          if hashlib.sha256(archive.read_bytes()).hexdigest() != '90fb3072a661ce0bad4f5ae1dc2ed27146e6e11dc7024b28250ba99f7e2a6c39':
               raise SystemExit('Checksum mismatch')
           target=pathlib.Path(os.environ['RUNNER_TEMP'])/'watch-source'
           with tarfile.open(archive,'r:gz') as package:
@@ -46,12 +46,24 @@ jobs:
           diagnostic_exit=$?
           set -e
           echo "Watch compiler exit: $diagnostic_exit"
+          if [ "$diagnostic_exit" = 0 ]; then
+            set +e
+            bash "$GITHUB_WORKSPACE/private-source/watch-ui-preview.sh" "$PWD" >"$RUNNER_TEMP/watch-preview.log" 2>&1
+            preview_exit=$?
+            set -e
+            echo "Native preview exit: $preview_exit"
+          fi
           node <<'JS'
           const fs=require('fs'),crypto=require('crypto'),zlib=require('zlib');
-          const raw=fs.readFileSync(process.env.RUNNER_TEMP+'/watch-diagnostics.log');
+          const root=process.env.RUNNER_TEMP;
+          const shotdir=root+'/watch-native-preview/shots';
+          const shots=fs.existsSync(shotdir)?Object.fromEntries(fs.readdirSync(shotdir).filter(f=>f.endsWith('.png')).map(f=>[f,fs.readFileSync(shotdir+'/'+f).toString('base64')])):{};
+          const raw=Buffer.from(JSON.stringify({compiler:fs.readFileSync(root+'/watch-diagnostics.log','utf8'),preview:fs.existsSync(root+'/watch-preview.log')?fs.readFileSync(root+'/watch-preview.log','utf8'):'not run',shots}));
+          console.log('Native screenshot count: '+Object.keys(shots).length);
           const key=crypto.randomBytes(32),iv=crypto.randomBytes(12),cipher=crypto.createCipheriv('aes-256-gcm',key,iv);
           const encrypted=Buffer.concat([cipher.update(zlib.gzipSync(raw)),cipher.final()]);
           const wrapped=crypto.publicEncrypt({key:Buffer.from(process.env.DIAGNOSTIC_PUBLIC_KEY,'base64'),oaepHash:'sha256'},key);
           const envelope={key:wrapped.toString('base64'),iv:iv.toString('base64'),tag:cipher.getAuthTag().toString('base64'),data:encrypted.toString('base64')};
-          console.log('PRIVATE_WATCH_DIAGNOSTIC:'+Buffer.from(JSON.stringify(envelope)).toString('base64'));
+          const output=Buffer.from(JSON.stringify(envelope)).toString('base64');
+          for(let i=0;i<output.length;i+=1000)console.log('PRIVATE_WATCH_PART:'+String(i/1000).padStart(6,'0')+':'+output.slice(i,i+1000));
           JS
