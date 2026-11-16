@@ -154,6 +154,15 @@ jobs:
               apps = [plistlib.loads(package.read(name)) for name in package.namelist() if name.endswith('.app/Info.plist')]
           if len(apps) != 2 or not all(app['CFBundleShortVersionString'] == os.environ['APP_VERSION'] and app['CFBundleVersion'] == os.environ['APP_BUILD'] for app in apps):
               raise SystemExit('Signed package verification failed')
+          phone = next((app for app in apps if app.get('UIDeviceFamily') == [1]), None)
+          watch = next((app for app in apps if app.get('UIDeviceFamily') == [4]), None)
+          if not phone or not watch or watch.get('WKApplication') is not True:
+              raise SystemExit('Watch application metadata verification failed')
+          if watch.get('WKCompanionAppBundleIdentifier') != phone.get('CFBundleIdentifier'):
+              raise SystemExit('Watch companion pairing verification failed')
+          if 'WatchOS' not in watch.get('CFBundleSupportedPlatforms', []):
+              raise SystemExit('Watch platform verification failed')
+          print('Signed Watch application and companion pairing verified.')
           print('Both signed app versions verified.')
           PY
       - name: Submit directly to Apple without public artifacts
