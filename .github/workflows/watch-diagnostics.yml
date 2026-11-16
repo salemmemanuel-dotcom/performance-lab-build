@@ -1,5 +1,19 @@
 name: Private Watch compiler diagnostics
-on: workflow_dispatch
+on:
+  workflow_dispatch:
+    inputs:
+      source_commit:
+        description: Approved private source commit
+        required: true
+        type: string
+      source_archive:
+        description: Approved private archive filename
+        required: true
+        type: string
+      source_sha256:
+        description: Approved archive SHA256
+        required: true
+        type: string
 permissions:
   contents: read
 jobs:
@@ -7,12 +21,25 @@ jobs:
     if: github.actor == github.repository_owner
     runs-on: macos-26-intel
     timeout-minutes: 20
+    env:
+      SOURCE_COMMIT: ${{ inputs.source_commit }}
+      SOURCE_ARCHIVE: ${{ inputs.source_archive }}
+      SOURCE_SHA256: ${{ inputs.source_sha256 }}
     steps:
+      - name: Validate private source references
+        shell: bash
+        run: |
+          python3 <<'PY'
+          import os, re
+          rules = {'SOURCE_COMMIT': r'[0-9a-f]{40}', 'SOURCE_ARCHIVE': r'performance-lab-[A-Za-z0-9.-]+\.tar\.gz', 'SOURCE_SHA256': r'[0-9a-f]{64}'}
+          if not all(re.fullmatch(pattern, os.environ[key]) for key, pattern in rules.items()):
+              raise SystemExit('Invalid source reference')
+          PY
       - name: Read approved private package
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
         with:
           repository: salemmemanuel-dotcom/performance-lab-native
-          ref: f227a3dba9980787fd5af4e7f6d21b783a89e1e9
+          ref: ${{ inputs.source_commit }}
           ssh-key: ${{ secrets.APP_SOURCE_READ_KEY }}
           persist-credentials: false
           show-progress: false
@@ -25,8 +52,8 @@ jobs:
           set -euo pipefail
           python3 <<'PY'
           import hashlib, pathlib, tarfile, shutil, os
-          archive=pathlib.Path('private-source/performance-lab-1.10.6-watch-simple-r5.tar.gz')
-          if hashlib.sha256(archive.read_bytes()).hexdigest() != 'fac32673f694494a09af0b8e0c92eff42234787eda5566af3f7a8e18258adc36':
+          archive=pathlib.Path('private-source')/os.environ['SOURCE_ARCHIVE']
+          if hashlib.sha256(archive.read_bytes()).hexdigest() != os.environ['SOURCE_SHA256']:
               raise SystemExit('Checksum mismatch')
           target=pathlib.Path(os.environ['RUNNER_TEMP'])/'watch-source'
           with tarfile.open(archive,'r:gz') as package:
@@ -48,7 +75,7 @@ jobs:
           echo "Watch compiler exit: $diagnostic_exit"
           if [ "$diagnostic_exit" = 0 ]; then
             set +e
-            bash "$GITHUB_WORKSPACE/private-source/watch-ui-preview.sh" "$PWD" >"$RUNNER_TEMP/watch-preview.log" 2>&1
+            bash "$GITHUB_WORKSPACE/private-source/watch-install-check.sh" "$PWD" >"$RUNNER_TEMP/watch-preview.log" 2>&1
             preview_exit=$?
             set -e
             echo "Native preview exit: $preview_exit"
@@ -67,3 +94,4 @@ jobs:
           const output=Buffer.from(JSON.stringify(envelope)).toString('base64');
           for(let i=0;i<output.length;i+=1000)console.log('PRIVATE_WATCH_PART:'+String(i/1000).padStart(6,'0')+':'+output.slice(i,i+1000));
           JS
+          test "$diagnostic_exit" = 0 && test "${preview_exit:-1}" = 0
